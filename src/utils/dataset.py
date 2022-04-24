@@ -112,6 +112,7 @@ def read_megadepth_gray(path, resize=None, df=None, padding=False, augment_fn=No
 
     image = cv2.resize(image, (w_new, h_new))
     scale = torch.tensor([w/w_new, h/h_new], dtype=torch.float)
+    
 
     if padding:  # padding
         pad_to = max(h_new, w_new)
