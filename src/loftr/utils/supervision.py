@@ -17,10 +17,28 @@ def mask_pts_at_padded_regions(grid_pt, mask):
     grid_pt[~mask.bool()] = 0
     return grid_pt
 
-
+# LightningModule > fit > training_step > _trainval_inference > compute_supervision_coarse > spvs_coarse -------------------------------------------------------
 @torch.no_grad()
 def spvs_coarse(data, config):
     """
+    
+    data = {
+            'image0': image0,  # (1, h, w)
+            'depth0': depth0,  # (h, w)
+            'image1': image1,
+            'depth1': depth1,
+            'T_0to1': T_0to1,  # (4, 4) # np.matmul(T1, np.linalg.inv(T0)), dtype=torch.float)[:4, :4]
+            'T_1to0': T_1to0,
+            'K0': K_0,  # (3, 3) # scene_info['intrinsics'][idx0].copy(), dtype=torch.float).reshape(3, 3)
+            'K1': K_1,
+            'scale0': scale0,  # [scale_w, scale_h]
+            'scale1': scale1,
+            'dataset_name': 'MegaDepth',
+            'scene_id': self.scene_id,
+            'pair_id': idx,
+            'pair_names': (self.scene_info['image_paths'][idx0], self.scene_info['image_paths'][idx1]),
+        }
+    
     Update:
         data (dict): {
             "conf_matrix_gt": [N, hw0, hw1],
@@ -37,21 +55,32 @@ def spvs_coarse(data, config):
     """
     # 1. misc
     device = data['image0'].device
+    
+    # size
     N, _, H0, W0 = data['image0'].shape
     _, _, H1, W1 = data['image1'].shape
+    
+    # scale
     scale = config['LOFTR']['RESOLUTION'][0]
     scale0 = scale * data['scale0'][:, None] if 'scale0' in data else scale
     scale1 = scale * data['scale1'][:, None] if 'scale0' in data else scale
+    
+    # scaleの適用
     h0, w0, h1, w1 = map(lambda x: x // scale, [H0, W0, H1, W1])
 
     # 2. warp grids
     # create kpts in meshgrid and resize them to image resolution
+    
+    # 格子座標を作成　pt0
     grid_pt0_c = create_meshgrid(h0, w0, False, device).reshape(1, h0*w0, 2).repeat(N, 1, 1)    # [N, hw, 2]
-    grid_pt0_i = scale0 * grid_pt0_c
+    grid_pt0_i = scale0 * grid_pt0_c 
+    
+    # 格子座標を作成　pt1
     grid_pt1_c = create_meshgrid(h1, w1, False, device).reshape(1, h1*w1, 2).repeat(N, 1, 1)
     grid_pt1_i = scale1 * grid_pt1_c
+    
 
-    # mask padded region to (0, 0), so no need to manually mask conf_matrix_gt
+    # マスクの適用 mask padded region to (0, 0), so no need to manually mask conf_matrix_gt
     if 'mask0' in data:
         grid_pt0_i = mask_pts_at_padded_regions(grid_pt0_i, data['mask0'])
         grid_pt1_i = mask_pts_at_padded_regions(grid_pt1_i, data['mask1'])
@@ -59,24 +88,30 @@ def spvs_coarse(data, config):
     # warp kpts bi-directionally and resize them to coarse-level resolution
     # (no depth consistency check, since it leads to worse results experimentally)
     # (unhandled edge case: points with 0-depth will be warped to the left-up corner)
+    
+    # キーポイントの作成 LoFTR/src/loftr/utils/geometry.py
     _, w_pt0_i = warp_kpts(grid_pt0_i, data['depth0'], data['depth1'], data['T_0to1'], data['K0'], data['K1'])
     _, w_pt1_i = warp_kpts(grid_pt1_i, data['depth1'], data['depth0'], data['T_1to0'], data['K1'], data['K0'])
     w_pt0_c = w_pt0_i / scale1
     w_pt1_c = w_pt1_i / scale0
 
     # 3. check if mutual nearest neighbor
-    w_pt0_c_round = w_pt0_c[:, :, :].round().long()
-    nearest_index1 = w_pt0_c_round[..., 0] + w_pt0_c_round[..., 1] * w1
-    w_pt1_c_round = w_pt1_c[:, :, :].round().long()
-    nearest_index0 = w_pt1_c_round[..., 0] + w_pt1_c_round[..., 1] * w0
+    w_pt0_c_round = w_pt0_c[:, :, :].round().long() # round():四捨五入
+    nearest_index1 = w_pt0_c_round[..., 0] + w_pt0_c_round[..., 1] * w1 # 幅を掛ける
+    w_pt1_c_round = w_pt1_c[:, :, :].round().long() # round():四捨五入
+    nearest_index0 = w_pt1_c_round[..., 0] + w_pt1_c_round[..., 1] * w0 # 幅を掛ける
 
-    # corner case: out of boundary
+    # はみ出した部分を削除 corner case: out of boundary
     def out_bound_mask(pt, w, h):
         return (pt[..., 0] < 0) + (pt[..., 0] >= w) + (pt[..., 1] < 0) + (pt[..., 1] >= h)
+    
     nearest_index1[out_bound_mask(w_pt0_c_round, w1, h1)] = 0
     nearest_index0[out_bound_mask(w_pt1_c_round, w0, h0)] = 0
-
+    
+    # 
     loop_back = torch.stack([nearest_index0[_b][_i] for _b, _i in enumerate(nearest_index1)], dim=0)
+    
+    # indexが等しいところを取り出す
     correct_0to1 = loop_back == torch.arange(h0*w0, device=device)[None].repeat(N, 1)
     correct_0to1[:, 0] = False  # ignore the top-left corner
 
@@ -108,7 +143,7 @@ def spvs_coarse(data, config):
         'spv_pt1_i': grid_pt1_i
     })
 
-
+# LightningModule > fit > training_step > _trainval_inference > compute_supervision_coarse ---------------------------------------------------------------
 def compute_supervision_coarse(data, config):
     assert len(set(data['dataset_name'])) == 1, "Do not support mixed datasets training!"
     data_source = data['dataset_name'][0]
@@ -119,7 +154,7 @@ def compute_supervision_coarse(data, config):
 
 
 ##############  ↓  Fine-Level supervision  ↓  ##############
-
+# LightningModule > fit > training_step > _trainval_inference > compute_supervision_fine > spvs_fine -----------------------------------------------------
 @torch.no_grad()
 def spvs_fine(data, config):
     """
@@ -142,7 +177,7 @@ def spvs_fine(data, config):
     expec_f_gt = (w_pt0_i[b_ids, i_ids] - pt1_i[b_ids, j_ids]) / scale / radius  # [M, 2]
     data.update({"expec_f_gt": expec_f_gt})
 
-
+# LightningModule > fit > training_step > _trainval_inference > compute_supervision_fine ---------------------------------------------------------------
 def compute_supervision_fine(data, config):
     data_source = data['dataset_name'][0]
     if data_source.lower() in ['scannet', 'megadepth']:
