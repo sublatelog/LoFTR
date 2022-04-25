@@ -1,5 +1,6 @@
 import torch
 
+# LoFTR/src/loftr/utils/supervision.py:spvs_coarse > geometry.py:warp_kpts
 
 @torch.no_grad()
 def warp_kpts(kpts0, depth0, depth1, T_0to1, K0, K1):
