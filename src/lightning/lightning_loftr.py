@@ -35,8 +35,12 @@ class PL_LoFTR(pl.LightningModule):
         self.config = config  # full config
         _config = lower_config(self.config)
         self.loftr_cfg = lower_config(_config['loftr'])
+        
         self.profiler = profiler or PassThroughProfiler()
-        self.n_vals_plot = max(config.TRAINER.N_VAL_PAIRS_TO_PLOT // config.TRAINER.WORLD_SIZE, 1)
+        
+        # _CN.TRAINER.N_VAL_PAIRS_TO_PLOT = 32
+        # _CN.TRAINER.WORLD_SIZE = 1
+        self.n_vals_plot = max(config.TRAINER.N_VAL_PAIRS_TO_PLOT // config.TRAINER.WORLD_SIZE, 1) # max(32 / 1, 1)=32
 
         # Matcher: LoFTR
         self.matcher = LoFTR(config=_config['loftr'])
@@ -79,6 +83,7 @@ class PL_LoFTR(pl.LightningModule):
         optimizer.step(closure=optimizer_closure)
         optimizer.zero_grad()
     
+    # LightningModule > fit > training_step > _trainval_inference
     def _trainval_inference(self, batch):
         with self.profiler.profile("Compute coarse supervision"):
             compute_supervision_coarse(batch, self.config)
@@ -109,6 +114,7 @@ class PL_LoFTR(pl.LightningModule):
             ret_dict = {'metrics': metrics}
         return ret_dict, rel_pair_names
     
+    # LightningModule > fit > training_step
     def training_step(self, batch, batch_idx):
         self._trainval_inference(batch)
         
@@ -120,6 +126,8 @@ class PL_LoFTR(pl.LightningModule):
 
             # net-params
             if self.config.LOFTR.MATCH_COARSE.MATCH_TYPE == 'sinkhorn':
+                
+                # log
                 self.logger.experiment.add_scalar(
                     f'skh_bin_score', self.matcher.coarse_matching.bin_score.clone().detach().cpu().data, self.global_step)
 
@@ -127,18 +135,26 @@ class PL_LoFTR(pl.LightningModule):
             if self.config.TRAINER.ENABLE_PLOTTING:
                 compute_symmetrical_epipolar_errors(batch)  # compute epi_errs for each match
                 figures = make_matching_figures(batch, self.config, self.config.TRAINER.PLOT_MODE)
+                
+                # log
                 for k, v in figures.items():
                     self.logger.experiment.add_figure(f'train_match/{k}', v, self.global_step)
 
         return {'loss': batch['loss']}
+    
 
+    # trainの1epoch終了後に実行される
     def training_epoch_end(self, outputs):
         avg_loss = torch.stack([x['loss'] for x in outputs]).mean()
+        
         if self.trainer.global_rank == 0:
             self.logger.experiment.add_scalar(
-                'train/avg_loss_on_epoch', avg_loss,
-                global_step=self.current_epoch)
+                                              'train/avg_loss_on_epoch', 
+                                              avg_loss,
+                                              global_step=self.current_epoch
+                                              )
     
+    # validation
     def validation_step(self, batch, batch_idx):
         self._trainval_inference(batch)
         
@@ -155,6 +171,7 @@ class PL_LoFTR(pl.LightningModule):
             'figures': figures,
         }
         
+    # valの1epoch終了後に実行
     def validation_epoch_end(self, outputs):
         # handle multiple validation sets
         multi_outputs = [outputs] if not isinstance(outputs[0], (list, tuple)) else outputs
