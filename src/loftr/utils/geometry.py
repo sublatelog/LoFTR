@@ -23,19 +23,20 @@ def warp_kpts(kpts0, depth0, depth1, T_0to1, K0, K1):
     # 格子座標の四捨五入
     kpts0_long = kpts0.round().long()
 
-    # 格子座標のに深さを積算 depth x 格子座標,　Sample depth, get calculable_mask on depth != 0
+    # 格子座標に対応する深さを縦に結合,　Sample depth, get calculable_mask on depth != 0
     kpts0_depth = torch.stack(
                               [depth0[i, kpts0_long[i, :, 1], kpts0_long[i, :, 0]] for i in range(kpts0.shape[0])], 
                               dim=0
-                              )  # (N, L)
+                              )  # (N, L) (x+y,1)
     
-    # 格子座標のゼロ出ない座標のindex
+    # nonzero_mask 深さのゼロ出ない座標のxy_index ****************************************************************************
     nonzero_mask = kpts0_depth != 0 # ゼロ以外を取り出す
 
-    # Unproject
+    # xyz*depth Unproject # make homogeneous
     kpts0_h = torch.cat([kpts0, torch.ones_like(kpts0[:, :, [0]])], dim=-1) * kpts0_depth[..., None]  # (N, L, 3) # 同じサイズで値が1のベクトル
     
     # 格子座標とcamera intrinsicsの行列積でカメラ座標
+    # inverse():逆行列を求める
     kpts0_cam = K0.inverse() @ kpts0_h.transpose(2, 1)  # (N, 3, L) # [@]:行列積
     
 
@@ -51,7 +52,11 @@ def warp_kpts(kpts0, depth0, depth1, T_0to1, K0, K1):
 
     # Covisible Check
     h, w = depth1.shape[1:3]
+    
+    # covisible_mask *********************************************************************************************************
     covisible_mask = (w_kpts0[:, :, 0] > 0) * (w_kpts0[:, :, 0] < w-1) * (w_kpts0[:, :, 1] > 0) * (w_kpts0[:, :, 1] < h-1)
+    
+    
     w_kpts0_long = w_kpts0.long()
     w_kpts0_long[~covisible_mask, :] = 0
 
@@ -60,7 +65,9 @@ def warp_kpts(kpts0, depth0, depth1, T_0to1, K0, K1):
                                 dim=0
                                 )  # (N, L)
     
+    # consistent_mask *********************************************************************************************************
     consistent_mask = ((w_kpts0_depth - w_kpts0_depth_computed) / w_kpts0_depth).abs() < 0.2
+    
     valid_mask = nonzero_mask * covisible_mask * consistent_mask
 
     return valid_mask, w_kpts0
